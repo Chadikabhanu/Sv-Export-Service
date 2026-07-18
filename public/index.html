@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>CSV Export Dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; }
+  button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.95rem; }
+  #startBtn { background: #2563eb; color: white; }
+  #cancelBtn { background: #dc2626; color: white; margin-left: 8px; }
+  #cancelBtn:disabled, #startBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .bar-track { background: #e5e7eb; border-radius: 6px; height: 18px; margin: 16px 0; overflow: hidden; }
+  .bar-fill { background: #2563eb; height: 100%; width: 0%; transition: width 0.2s ease; }
+  .meta { font-size: 0.9rem; color: #444; display: flex; gap: 16px; flex-wrap: wrap; }
+  #status { font-weight: 600; }
+  #log { margin-top: 24px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eee; }
+  #downloadLink { display: none; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <h1>CSV Export Dashboard</h1>
+  <p>Exports the <code>users</code> table (100k+ rows) as CSV with live progress.</p>
+
+  <button id="startBtn">Start Export</button>
+  <button id="cancelBtn" disabled>Cancel</button>
+
+  <div class="bar-track"><div class="bar-fill" id="barFill"></div></div>
+  <div class="meta">
+    <span id="status">Idle</span>
+    <span id="percentage"></span>
+    <span id="counts"></span>
+    <span id="eta"></span>
+  </div>
+
+  <a id="downloadLink" href="#">Download CSV</a>
+
+  <div id="log">
+    <h2>Recent Exports</h2>
+    <table>
+      <thead><tr><th>Export ID</th><th>Status</th><th>Created</th><th>Completed</th></tr></thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </div>
+
+<script>
+  const startBtn = document.getElementById('startBtn');
+  const cancelBtn = document.getElementById('cancelBtn');
+  const barFill = document.getElementById('barFill');
+  const statusEl = document.getElementById('status');
+  const percentageEl = document.getElementById('percentage');
+  const countsEl = document.getElementById('counts');
+  const etaEl = document.getElementById('eta');
+  const downloadLink = document.getElementById('downloadLink');
+  const logBody = document.getElementById('logBody');
+
+  let ws = null;
+
+  async function refreshLog() {
+    const res = await fetch('/api/exports');
+    const data = await res.json();
+    logBody.innerHTML = data.exports.map(e => `
+      <tr>
+        <td>${e.exportId.slice(0, 8)}…</td>
+        <td>${e.status}</td>
+        <td>${e.createdAt ? new Date(e.createdAt).toLocaleTimeString() : ''}</td>
+        <td>${e.completedAt ? new Date(e.completedAt).toLocaleTimeString() : '-'}</td>
+      </tr>
+    `).join('');
+  }
+
+  function connect(exportId) {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws/exports/${exportId}`);
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+
+      if (msg.status === 'processing' || msg.status === 'queued') {
+        statusEl.textContent = msg.status;
+        if (msg.progress) {
+          const pct = msg.progress.percentage || 0;
+          barFill.style.width = pct + '%';
+          percentageEl.textContent = pct.toFixed(1) + '%';
+          countsEl.textContent = `${msg.progress.processed} / ${msg.progress.total} rows`;
+          etaEl.textContent = msg.progress.etaSeconds != null ? `ETA ${msg.progress.etaSeconds}s` : '';
+        }
+      } else if (msg.status === 'completed') {
+        statusEl.textContent = 'completed';
+        barFill.style.width = '100%';
+        percentageEl.textContent = '100%';
+        downloadLink.href = msg.downloadUrl;
+        downloadLink.style.display = 'inline-block';
+        downloadLink.textContent = `Download CSV (${(msg.fileSize / 1024).toFixed(1)} KB)`;
+        cancelBtn.disabled = true;
+        startBtn.disabled = false;
+        refreshLog();
+      } else if (msg.status === 'failed') {
+        statusEl.textContent = 'failed: ' + msg.error;
+        cancelBtn.disabled = true;
+        startBtn.disabled = false;
+        refreshLog();
+      } else if (msg.status === 'cancelled') {
+        statusEl.textContent = 'cancelled';
+        cancelBtn.disabled = true;
+        startBtn.disabled = false;
+        refreshLog();
+      }
+    };
+
+    ws.onclose = () => { /* connection ended */ };
+  }
+
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    downloadLink.style.display = 'none';
+    barFill.style.width = '0%';
+    statusEl.textContent = 'starting…';
+
+    const res = await fetch('/api/exports', { method: 'POST' });
+    const { exportId } = await res.json();
+
+    cancelBtn.disabled = false;
+    connect(exportId);
+    refreshLog();
+  });
+
+  cancelBtn.addEventListener('click', () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ action: 'cancel' }));
+    }
+  });
+
+  refreshLog();
+</script>
+</body>
+</html>
